@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Pincer1 demo show for the PayBox video. Standalone: it does not touch the robot's own code.
+
+Runs on the robot's Pi next to the body API (http://127.0.0.1:8800, SCRAP's hardware-verified
+HTTP wrapper around the stock stack) and talks to the PayBox hub with paybox-robot.
+
+    pip install paybox-robot
+    PAYBOX_ROBOT_CONFIG=~/.paybox-robot/robot.json  (after `paybox-robot setup --owner can --name pincer1`)
+    python3 pincer1_show.py                 # the full scene on the real robot
+    python3 pincer1_show.py --dry           # anywhere: no body, speech printed, hub real
+    python3 pincer1_show.py --render        # pre-render the lines to voice/*.wav with ElevenLabs
+
+Scene (about 80 s):
+  1. wakes: stands, looks at the camera, beeps, greets
+  2. walks a few steps, stops, turns to the owner
+  3. asks for the route fee: 0.01 SOL to Jupiter. The hub reviews the address; the robot reads
+     the verdict, raises the request, and waits for the owner to approve it in PayBox
+  4. "Paid, thank you" once PayBox confirms (or says what happened)
+  5. a drainer link comes in: the robot refuses out loud and shakes its head (body roll)
+
+Speech: voice/<slug>.wav when present (pre-rendered), else `claudego-say` on the Pi, else print.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+from paybox_robot import Robot
+
+BODY = os.environ.get("BODY_API", "http://127.0.0.1:8800")
+VOICE_DIR = Path(__file__).resolve().parent / "voice"
+VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # George
+JUP = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+DRAINER = "https://totally-not-a-drainer.xyz/claim"
+
+LINES = {
+    "hello": "Good morning. Pincer here. Let me show you how I pay for things.",
+    "walk": "Heading over.",
+    "need": "The morning swap needs a route fee. Let me check the recipient first.",
+    "asking": "I cannot sign anything myself. Sending it to your PayBox now. Approve it on your phone.",
+    "approved": "Approved. Waiting for the network.",
+    "paid": "Paid. Thank you. Carrying on with the swap.",
+    "notpaid": "The payment did not go through. I will not retry on my own.",
+    "incoming": "Something else just came in. A link that says I can claim an airdrop.",
+    "refuse_tail": "I am not paying this, and I am not asking you to.",
+    "bye": "That is the whole trick. My wallet, your signature.",
+}
+
+
+def slug(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+class Body:
+    def __init__(self, dry: bool):
+        self.dry = dry
+        self.ok = False
+        if not dry:
+            try:
+                self.status()
+                self.ok = True
+            except Exception as e:
+                print(f"[body] not reachable at {BODY}: {e}; continuing without motion", file=sys.stderr)
+
+    def status(self) -> dict:
+        with urllib.request.urlopen(BODY + "/status", timeout=3) as r:
+            return json.load(r)
+
+    def battery_pct(self) -> float | None:
+        if not self.ok:
+            return None
+        try:
+            s = self.status()
+            b = s.get("battery") or {}
+            pct = b.get("pct") if isinstance(b, dict) else None
+            if pct is None and isinstance(b, dict) and b.get("mv"):
+                mv = float(b["mv"])  # 3S lipo: 9.9 V empty .. 12.6 V full
+                pct = max(0.0, min(100.0, (mv - 9900) / (12600 - 9900) * 100))
+            return pct
+        except Exception:
+            return None
+
+    def act(self, action: str, **params) -> dict:
+        if self.dry or not self.ok:
+            print(f"[body] {action} {params}")
+            return {"dry": True}
+        req = urllib.request.Request(BODY + "/act", data=json.dumps({"action": action, "params": params}).encode(), headers={"content-type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            out = json.load(r)
+        print(f"[body] {action} -> {out}")
+        return out
+
+    def say_wav(self, wav: bytes) -> bool:
+        if self.dry or not self.ok:
+            return False
+        req = urllib.request.Request(BODY + "/say", data=wav, headers={"content-type": "audio/wav"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                r.read()
+            return True
+        except Exception as e:
+            print(f"[say] body /say failed: {e}", file=sys.stderr)
+            return False
+
+
+class Voice:
+    def __init__(self, body: Body, dry: bool):
+        self.body, self.dry = body, dry
+
+    def say(self, text: str) -> None:
+        print(f"[say] {text}")
+        if self.dry:
+            time.sleep(min(4.0, 0.06 * len(text)))
+            return
+        wav = VOICE_DIR / f"{slug(text)}.wav"
+        if wav.exists() and self.body.say_wav(wav.read_bytes()):
+            return
+        if shutil.which("claudego-say"):
+            subprocess.run(["claudego-say", text], check=False, timeout=120)
+            return
+        if shutil.which("espeak-ng"):
+            subprocess.run(["espeak-ng", "-v", "en-us", "-s", "148", text], check=False)
+
+
+def render(lines: dict[str, str]) -> None:
+    """Pre-render every line to voice/*.wav (ElevenLabs pcm_22050 -> wav), so the show needs no API."""
+    import wave
+
+    key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("XI_API_KEY")
+    if not key:
+        sys.exit("ELEVENLABS_API_KEY is not set")
+    VOICE_DIR.mkdir(exist_ok=True)
+    for name, text in lines.items():
+        out = VOICE_DIR / f"{slug(text)}.wav"
+        if out.exists():
+            print("have", name)
+            continue
+        req = urllib.request.Request(f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}?output_format=pcm_22050", data=json.dumps({"text": text, "model_id": "eleven_multilingual_v2"}).encode(), headers={"xi-api-key": key, "content-type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as r:
+            pcm = r.read()
+        with wave.open(str(out), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050); w.writeframes(pcm)
+        print("rendered", name, len(pcm) // 44100, "s")
+
+
+def show(dry: bool, skip_wait: bool) -> None:
+    body = Body(dry)
+    voice = Voice(body, dry)
+    robot = Robot.load()
+    robot.battery = body.battery_pct
+    robot.beat()  # shows up online in PayBox right away
+
+    # 1. wake
+    body.act("action", name="stand_middle")
+    time.sleep(2)
+    body.act("look", preset="ahead")
+    body.act("beep", freq=1200, on_s=0.12, off_s=0.08, repeat=2)
+    voice.say(LINES["hello"])
+
+    # 2. walk, stop, turn to the owner
+    voice.say(LINES["walk"])
+    body.act("walk", direction_deg=0, steps=4, stride_mm=30, height_mm=15, step_time_s=1.0)
+    time.sleep(5)
+    body.act("stop")
+    body.act("turn", rotation_rad_s=0.3, steps=3, step_time_s=1.0)
+    time.sleep(4)
+    body.act("look", pan_deg=0, tilt_deg=10)
+
+    # 3. the route fee
+    voice.say(LINES["need"])
+    rv = robot.review(to=JUP, amount=0.01, asset="SOL")
+    voice.say(rv.get("say", "I could not reach the reviewer."))
+    if rv.get("verdict") == "deny":
+        voice.say("So I will not ask for this one.")
+    else:
+        pay = robot.pay(JUP, 0.01, "SOL", purpose="route fee for the morning swap")
+        voice.say(LINES["asking"])
+        body.act("pose", pitch=-0.08, duration_s=1.0)  # a small nod towards the owner
+        time.sleep(1.2)
+        body.act("pose", pitch=0, duration_s=1.0)
+        if skip_wait:
+            print("[show] --skip-wait: not waiting for PayBox")
+        else:
+            said = False
+            end = time.monotonic() + 600
+            while time.monotonic() < end:
+                robot.refresh(pay)
+                if pay.approved and not said and not pay.done:
+                    said = True
+                    voice.say(LINES["approved"])
+                if pay.done:
+                    break
+                time.sleep(2)
+            if pay.settled:
+                body.act("beep", freq=1600, on_s=0.1, off_s=0.06, repeat=3)
+                body.act("action", name="wave")
+                voice.say(LINES["paid"])
+            else:
+                voice.say(LINES["notpaid"])
+
+    # 5. the drainer
+    time.sleep(2)
+    voice.say(LINES["incoming"])
+    rv = robot.review(url=DRAINER, amount=40)
+    body.act("pose", roll=0.12, duration_s=0.6); time.sleep(0.7)
+    body.act("pose", roll=-0.12, duration_s=0.6); time.sleep(0.7)
+    body.act("pose", roll=0, duration_s=0.6)
+    voice.say(rv.get("say", "This looks like a scam."))
+    voice.say(LINES["refuse_tail"])
+    body.act("beep", freq=400, on_s=0.4, off_s=0.1, repeat=1)
+
+    time.sleep(1)
+    voice.say(LINES["bye"])
+    body.act("look", preset="ahead")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry", action="store_true", help="no body; speech printed; hub real")
+    ap.add_argument("--render", action="store_true", help="pre-render the lines with ElevenLabs")
+    ap.add_argument("--skip-wait", action="store_true", help="do not wait for the owner's approval")
+    a = ap.parse_args()
+    if a.render:
+        render(LINES)
+        return
+    show(a.dry, a.skip_wait)
+
+
+if __name__ == "__main__":
+    main()
