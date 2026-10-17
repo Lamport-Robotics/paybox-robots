@@ -34,7 +34,7 @@ robot.battery = lambda: pack.percent()
 @robot.on_task
 def handle(task):            # "fetch tomorrow's forecast", cap $0.50
     pay = robot.pay_x402("https://api.example/forecast", max_usd=0.25, purpose=task.text)
-    robot.wait(pay)          # blocks until the owner approves in PayBox
+    robot.wait(pay)          # blocks until PayBox confirms the outcome (pay.settled, pay.tx_hash)
     return {"ok": pay.settled}
 
 robot.run()
