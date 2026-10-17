@@ -160,7 +160,7 @@ function createServer() {
 
   server.registerTool("settle_robot_payment", {
     title: "Settle a robot's payment request",
-    description: "Turn a pending robot payment into a PayBox proposal: an x402 paid request (USDC on Base or Solana) or a transfer to the merchant address (USDC on Base, SOL on Solana with the owner's address as sender). Run review_payment first and read its line to the owner; do not settle a request Lamport marked deny unless the owner insists.",
+    description: "Turn a pending robot payment into a PayBox proposal: an x402 paid request (USDC on Base or Solana) or a transfer to the merchant address (USDC on Base, SOL on Solana with the owner's address as sender). Run review_payment first and read its line to the owner; do not settle a request Lamport marked deny unless the owner insists. After the owner approves, follow the returned request ID to a terminal status and call confirm_robot_payment with it, so the robot learns whether the money actually moved.",
     inputSchema: z.object({ payment_id: paymentId, sender: solanaAddress.optional(), max_amount_cents: z.number().int().min(1).optional() }).strict(),
     outputSchema: z.union([x402OutputSchema, evmOutputSchema, solanaOutputSchema]),
     annotations: proposal,
@@ -187,6 +187,20 @@ function createServer() {
       }
       return fail("The merchant is not an address and the request is not x402; nothing to propose.");
     } catch (e) { return fail(`Could not build the proposal: ${(e as Error).message}`); }
+  });
+
+  server.registerTool("confirm_robot_payment", {
+    title: "Confirm what happened to a robot's payment",
+    description: "Report the terminal outcome of a settled robot payment back to the robot: after the owner approves and PayBox broadcasts, poll the request ID until success, failed or rejected and pass it here with the transaction hash when there is one. The robot is waiting on this to continue its task. Call it also when the owner declines, so the robot stops waiting.",
+    inputSchema: z.object({ payment_id: paymentId, status: z.enum(["success", "failed", "rejected", "pending_confirmation"]), request_id: z.string().max(120).optional(), tx_hash: z.string().max(120).optional(), note: z.string().max(200).optional() }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async ({ payment_id, status, request_id, tx_hash, note }) => {
+    try {
+      const r = await fetch(`${HUB}/payments/${payment_id}/settle`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status, request_id, tx_hash, note }), signal: AbortSignal.timeout(8_000) });
+      if (!r.ok) return fail("The hub did not accept the confirmation (" + r.status + ").");
+      const j = (await r.json()) as any;
+      return { content: [text(status === "success" ? "Recorded: " + (j.amount ?? "the payment") + " paid" + (tx_hash ? " (" + tx_hash.slice(0, 10) + "…)" : "") + ". The robot has been told." : "Recorded as " + status + ". The robot will stop waiting.")] };
+    } catch (e) { return fail("Could not reach the hub: " + (e instanceof Error ? e.message : String(e))); }
   });
 
   return server;
