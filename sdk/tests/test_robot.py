@@ -83,7 +83,11 @@ def test_pay_wait_and_record(robot):
     pay = robot.pay("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", 0.01, "SOL", "route fee")
     assert pay.allowed and STATE["payments"][pay.id]["asset"] == "SOL" and STATE["payments"][pay.id]["amount_atomic"] == "10000000" and "amount_cents" not in STATE["payments"][pay.id]
     threading.Timer(0.3, lambda: STATE["payments"][pay.id].update(status="proposed")).start()
-    assert robot.wait(pay, timeout=5, every=0.1).settled
+    assert robot.wait(pay, timeout=5, every=0.1, until="approved").approved and not pay.settled and not pay.done
+    assert not robot.wait(pay, timeout=0.5, every=0.1).done  # still in flight: wait() for done times out
+    threading.Timer(0.3, lambda: STATE["payments"][pay.id].update(status="success", tx_hash="5xyz")).start()
+    pay = robot.wait(pay, timeout=5, every=0.1)
+    assert pay.done and pay.settled and pay.tx_hash == "5xyz"
     robot.record(pay, "success", amount_cents=1000)
     assert robot.spent_cents == 1000
     with pytest.raises(ValueError):
@@ -94,6 +98,12 @@ def test_x402(robot):
     pay = robot.pay_x402("https://api.example.com/forecast?city=bkk", 0.25, "weather")
     p = STATE["payments"][pay.id]
     assert p["kind"] == "x402" and p["merchant"] == "api.example.com" and p["amount_cents"] == 25 and p["amount_atomic"] == "250000"
+
+def test_drop(robot):
+    pay = robot.pay("0x" + "4" * 40, 0.10, "USDC", "oops")
+    robot.drop(pay)
+    assert pay.done and STATE["payments"][pay.id]["status"] == "dropped"
+
 
 def test_review(robot):
     assert robot.review(to="0x" + "3" * 40, amount=5000, asset="USDC")["verdict"] == "deny"

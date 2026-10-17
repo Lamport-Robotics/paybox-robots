@@ -9,7 +9,8 @@
     pay = robot.pay_x402("https://api.example/forecast", max_usd=0.25, purpose="weather")
 
 `pay` returns at once with the hub's review (allow / hold / deny). The owner sees the request in
-PayBox and settles it there; `robot.wait(pay)` blocks until the status changes.
+PayBox and settles it there; `robot.wait(pay)` blocks until PayBox confirmed the outcome
+(`pay.settled`, `pay.tx_hash`), or until approval with `until="approved"`.
 """
 
 from __future__ import annotations
@@ -26,8 +27,9 @@ from typing import Any, Callable
 from .hub import DEFAULT_HUB, Hub, HubError
 
 CONFIG = Path(os.environ.get("PAYBOX_ROBOT_CONFIG", Path.home() / ".paybox-robot" / "robot.json"))
-PENDING = ("requested",)           # waiting for the owner
-SETTLED = ("proposed", "success")  # the owner's PayBox took it
+PENDING = ("requested",)                        # waiting for the owner to look at it
+IN_FLIGHT = ("proposed", "pending_confirmation")  # approved in PayBox, broadcast not final yet
+TERMINAL = ("success", "failed", "rejected", "dropped")
 
 
 DECIMALS = {"SOL": 9, "USDC": 6}
@@ -71,8 +73,22 @@ class Payment:
         return self.verdict != "deny"
 
     @property
+    def approved(self) -> bool:
+        """The owner acted on it in PayBox (approved, or already paid)."""
+        return self.status in IN_FLIGHT or self.status == "success"
+
+    @property
     def settled(self) -> bool:
-        return self.status in SETTLED
+        """PayBox confirmed the money moved."""
+        return self.status == "success"
+
+    @property
+    def done(self) -> bool:
+        return self.status in TERMINAL
+
+    @property
+    def tx_hash(self) -> str | None:
+        return self.raw.get("tx_hash")
 
 
 class Robot:
@@ -187,11 +203,13 @@ class Robot:
         pay.status, pay.raw = p.get("status", pay.status), p
         return pay
 
-    def wait(self, pay: Payment, timeout: float = 600, every: float = 3.0) -> Payment:
-        """Block until the owner acted on the request in PayBox (or `timeout` seconds)."""
+    def wait(self, pay: Payment, timeout: float = 600, every: float = 3.0, until: str = "done") -> Payment:
+        """Block until the payment is `done` (success / failed / rejected, i.e. PayBox confirmed the outcome)
+        or, with until="approved", as soon as the owner approved it. Returns on `timeout` either way."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            if self.refresh(pay).status not in PENDING:
+            self.refresh(pay)
+            if pay.done or (until == "approved" and pay.approved):
                 return pay
             time.sleep(every)
         return pay
@@ -202,3 +220,7 @@ class Robot:
         pay.status = status
         if status == "success" and amount_cents:
             self.spent_cents += amount_cents
+
+    def drop(self, pay: Payment) -> None:
+        """Withdraw a request the robot no longer needs."""
+        self.record(pay, "dropped")
