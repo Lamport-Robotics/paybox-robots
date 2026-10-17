@@ -36,6 +36,12 @@ from pathlib import Path
 
 from paybox_robot import Robot
 
+_env = Path(__file__).resolve().parent / ".env"
+if _env.exists():
+    for line in _env.read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1); os.environ.setdefault(k.strip(), v.strip())
+
 BODY = os.environ.get("BODY_API", "http://127.0.0.1:8800")
 VOICE_DIR = Path(__file__).resolve().parent / "voice"
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # George
@@ -122,6 +128,11 @@ class Voice:
             time.sleep(min(4.0, 0.06 * len(text)))
             return
         wav = VOICE_DIR / f"{slug(text)}.wav"
+        if not wav.exists() and (os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("XI_API_KEY")):
+            try:
+                render({"live": text})  # the hub's verdict lines are composed at run time; cache them too
+            except Exception as e:
+                print(f"[say] render failed: {e}", file=sys.stderr)
         if wav.exists() and self.body.say_wav(wav.read_bytes()):
             return
         if shutil.which("claudego-say"):
@@ -149,7 +160,7 @@ def render(lines: dict[str, str]) -> None:
             pcm = r.read()
         with wave.open(str(out), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050); w.writeframes(pcm)
-        print("rendered", name, len(pcm) // 44100, "s")
+        print("rendered", name, len(pcm) // 44100, "s") if name != "live" else None
 
 
 def show(dry: bool, skip_wait: bool) -> None:
