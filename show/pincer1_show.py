@@ -44,7 +44,7 @@ if _env.exists():
 
 BODY = os.environ.get("BODY_API", "http://127.0.0.1:8800")
 VOICE_DIR = Path(__file__).resolve().parent / "voice"
-VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # George
+VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "SAz9YHcvj6GT2YYXdXww")  # River: calm, neutral
 MERCHANT = os.environ.get("SHOW_MERCHANT", "0x5Fe289A3B3f03367eC70f15F6067ceBDd65aBb57")  # the owner's own wallet in the demo
 AMOUNT, ASSET = float(os.environ.get("SHOW_AMOUNT", "1.50")), os.environ.get("SHOW_ASSET", "USDC")
 DRAINER = "https://totally-not-a-drainer.xyz/claim"
@@ -159,11 +159,15 @@ def render(lines: dict[str, str]) -> None:
         if out.exists():
             print("have", name)
             continue
-        req = urllib.request.Request(f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}?output_format=pcm_22050", data=json.dumps({"text": text, "model_id": "eleven_multilingual_v2"}).encode(), headers={"xi-api-key": key, "content-type": "application/json"}, method="POST")
+        req = urllib.request.Request(f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}?output_format=pcm_24000", data=json.dumps({"text": text, "model_id": "eleven_multilingual_v2", "voice_settings": {"stability": 0.45, "similarity_boost": 0.8, "style": 0.2}}).encode(), headers={"xi-api-key": key, "content-type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=60) as r:
             pcm = r.read()
+        import array
+        a = array.array("h"); a.frombytes(pcm[: len(pcm) - len(pcm) % 2])
+        peak = max(1, max(abs(v) for v in a)); gain = min(4.0, 29000 / peak)  # normalise so the small speaker gets a full signal
+        a = array.array("h", (int(max(-32768, min(32767, v * gain))) for v in a)); pcm = a.tobytes()
         with wave.open(str(out), "wb") as w:
-            w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050); w.writeframes(pcm)
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
         print("rendered", name, len(pcm) // 44100, "s") if name != "live" else None
 
 
