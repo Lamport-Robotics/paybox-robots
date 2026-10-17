@@ -86,12 +86,10 @@ class Body:
             return None
         try:
             s = self.status()
-            b = s.get("battery") or {}
-            pct = b.get("pct") if isinstance(b, dict) else None
-            if pct is None and isinstance(b, dict) and b.get("mv"):
-                mv = float(b["mv"])  # 3S lipo: 9.9 V empty .. 12.6 V full
-                pct = max(0.0, min(100.0, (mv - 9900) / (12600 - 9900) * 100))
-            return pct
+            mv = s.get("battery_mv") or (s.get("battery") or {}).get("mv")
+            if not mv:
+                return None
+            return round(max(0.0, min(100.0, (float(mv) - 9900) / (12600 - 9900) * 100)), 1)  # 3S lipo: 9.9 V empty .. 12.6 V full
         except Exception:
             return None
 
@@ -173,7 +171,8 @@ def show(dry: bool, skip_wait: bool) -> None:
     voice = Voice(body, dry)
     robot = Robot.load()
     robot.battery = body.battery_pct
-    robot.beat()  # shows up online in PayBox right away
+    robot.heartbeat_s = 4
+    robot.start()  # keeps the robot online in PayBox and picks up dispatched tasks while the show runs
 
     # 1. wake
     body.act("action", name="stand_middle")
@@ -184,11 +183,10 @@ def show(dry: bool, skip_wait: bool) -> None:
 
     # 2. walk, stop, turn to the owner
     voice.say(LINES["walk"])
-    body.act("walk", direction_deg=0, steps=4, stride_mm=30, height_mm=15, step_time_s=1.0)
-    time.sleep(5)
-    body.act("stop")
-    body.act("turn", rotation_rad_s=0.3, steps=3, step_time_s=1.0)
-    time.sleep(4)
+    body.act("walk", direction="forward", speed=0.06, seconds=4)
+    time.sleep(4.5)
+    body.act("turn", yaw=0.35, seconds=3)
+    time.sleep(3.5)
     body.act("look", pan_deg=0, tilt_deg=10)
 
     # 3. the route fee
@@ -218,7 +216,7 @@ def show(dry: bool, skip_wait: bool) -> None:
                 time.sleep(2)
             if pay.settled:
                 body.act("beep", freq=1600, on_s=0.1, off_s=0.06, repeat=3)
-                body.act("action", name="wave")
+                body.act("action", name="clap")
                 voice.say(LINES["paid"])
             else:
                 voice.say(LINES["notpaid"])
