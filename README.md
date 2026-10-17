@@ -4,7 +4,7 @@ A wallet for a robot that only its owner can spend.
 
 The robot registers once, heartbeats battery and budget, picks up tasks and raises
 payment requests. The owner sees all of it inside [PayBox](https://paybox.sh) through
-the **Lamport Robots** plugin: list robots, send a task with a spending cap, read what a
+the **PayBox for Robots** plugin: list robots, send a task with a spending cap, read what a
 robot wants to pay and why, approve it. The robot never holds a key and the plugin never
 signs; PayBox builds, simulates and signs every transaction with the owner's approval.
 
@@ -50,7 +50,7 @@ robot can say out loud.
 
 ## In PayBox
 
-Enable the Lamport Robots plugin, then talk to it:
+Enable the PayBox for Robots plugin, then talk to it:
 
 > list my robots, owner code `can`
 > send pincer1 to check the mailbox, cap $1

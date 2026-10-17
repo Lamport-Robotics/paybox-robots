@@ -56,7 +56,7 @@ const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: t
 const proposal = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 
 function createServer() {
-  const server = new McpServer({ name: "lamport-robots", version: "0.1.0" }, { supportedProtocolVersions: [PROTOCOL_VERSION] });
+  const server = new McpServer({ name: "lamport-robots", title: "PayBox for Robots", version: "0.1.0" }, { supportedProtocolVersions: [PROTOCOL_VERSION] });
 
   server.registerTool("list_robots", {
     title: "List the owner's robots",

@@ -1,4 +1,4 @@
-# lamport-robots plugin
+# PayBox for Robots — plugin
 
 The PayBox side. A TypeScript MCP server bundled into one `dist/plugin.mjs`.
 
