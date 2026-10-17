@@ -133,8 +133,13 @@ class Voice:
                 render({"live": text})  # the hub's verdict lines are composed at run time; cache them too
             except Exception as e:
                 print(f"[say] render failed: {e}", file=sys.stderr)
-        if wav.exists() and self.body.say_wav(wav.read_bytes()):
-            return
+        if wav.exists():
+            if shutil.which("paplay"):  # the robot's speaker sits behind PipeWire on the host
+                env = {**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")}
+                if subprocess.run(["paplay", str(wav)], env=env, check=False, timeout=120).returncode == 0:
+                    return
+            if self.body.say_wav(wav.read_bytes()):
+                return
         if shutil.which("claudego-say"):
             subprocess.run(["claudego-say", text], check=False, timeout=120)
             return
