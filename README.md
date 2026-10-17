@@ -18,7 +18,7 @@ robot  --paybox-robot-->  hub (lamport.si/api/robots)  <--plugin--  PayBox (owne
 ## On the robot
 
 ```
-pip install paybox-robot
+pip install "git+https://github.com/Lamport-Robotics/paybox-robots#subdirectory=sdk"
 paybox-robot setup --owner <code> --name pincer1 --budget 20
 paybox-robot run
 ```

@@ -3,7 +3,7 @@
 Runs against the real robot on ws://127.0.0.1:7402, or on a laptop with no robot
 (speech is printed, the passphrase step is skipped).
 
-    pip install paybox-robot[pincer1]
+    pip install "paybox-robot[pincer1] @ git+https://github.com/Lamport-Robotics/paybox-robots#subdirectory=sdk"
     paybox-robot setup --owner can --name pincer1 --kind hexapod --budget 20
     python examples/pincer1_demo.py
 """
