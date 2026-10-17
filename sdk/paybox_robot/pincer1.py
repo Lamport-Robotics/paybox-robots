@@ -78,17 +78,26 @@ class Pincer1Bridge:
         asyncio.get_running_loop().create_task(self._follow(pay))
         return pay
 
-    async def _follow(self, pay: Payment, timeout: float = 600, every: float = 3.0) -> None:
+    async def _follow(self, pay: Payment, timeout: float = 900, every: float = 3.0) -> None:
         loop = asyncio.get_running_loop()
+        said_approved = False
         for _ in range(int(timeout / every)):
             await asyncio.sleep(every)
             try:
                 await loop.run_in_executor(None, self.robot.refresh, pay)
             except Exception:
                 continue
-            if pay.status not in ("requested",):
+            if pay.approved and not said_approved and not pay.done:
+                said_approved = True
+                await self.say("Approved. Waiting for the network.")
+            if pay.done:
                 break
-        await self.say("Thank you, payment approved." if pay.settled else f"The payment ended as {pay.status}.")
+        if pay.settled:
+            await self.say("Paid. Thank you.")
+        elif pay.done:
+            await self.say(f"The payment was {pay.status}. I will not retry on my own.")
+        else:
+            await self.say("No word from PayBox yet. I will keep the request open.")
 
     async def _handle(self, msg: dict) -> None:
         mid = msg.get("id")

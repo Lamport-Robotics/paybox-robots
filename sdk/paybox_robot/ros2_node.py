@@ -109,8 +109,8 @@ def main(argv=None) -> int:
                     continue
                 if pay.status != before:
                     self._publish(pay)
-                    self._say("My owner approved the payment." if pay.settled else f"Payment {pay.status}.")
-                    if pay.status not in ("requested",):
+                    self._say("Paid." if pay.settled else "Approved, waiting for the network." if pay.approved else f"Payment {pay.status}.")
+                    if pay.done:
                         self._open.pop(pid, None)
 
     rclpy.init(args=argv)
