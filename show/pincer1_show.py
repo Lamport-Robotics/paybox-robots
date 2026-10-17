@@ -178,7 +178,7 @@ def show(dry: bool, skip_wait: bool) -> None:
     # 1. wake
     body.act("action", name="stand_middle")
     time.sleep(2)
-    body.act("look", preset="ahead")
+    body.act("look", preset="low")  # the opening shot: camera a little lower
     body.act("beep", freq=1200, on_s=0.12, off_s=0.08, repeat=2)
     voice.say(LINES["hello"])
 
