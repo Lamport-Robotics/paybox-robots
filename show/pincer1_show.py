@@ -188,7 +188,7 @@ def show(dry: bool, skip_wait: bool) -> None:
     time.sleep(4.5)
     body.act("turn", yaw=0.35, seconds=3)
     time.sleep(3.5)
-    body.act("look", pan_deg=0, tilt_deg=10)
+    body.act("look", preset="up")  # toward the owner
 
     # 3. the route fee
     voice.say(LINES["need"])
