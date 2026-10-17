@@ -2,6 +2,10 @@
 
     ros2 run paybox_robot paybox-robot-ros2     # or just: paybox-robot-ros2
 
+Anyone on the ROS 2 graph can publish to these topics; without SROS2 that is the whole LAN. A rogue
+publisher cannot move money (the owner still approves in PayBox) but can put a recipient and a purpose
+line in front of the owner. Run this node in a secured DDS domain on a shared network.
+
 Subscribes
     /battery_state   sensor_msgs/BatteryState   percentage (0..1 or 0..100) -> heartbeat
     /paybox/pay      std_msgs/String  JSON {"to": addr, "amount": 0.01, "asset": "SOL", "purpose": "..."}
@@ -24,6 +28,8 @@ from .robot import Robot
 def main(argv=None) -> int:
     try:
         import rclpy
+        from rclpy.callback_groups import ReentrantCallbackGroup
+        from rclpy.executors import MultiThreadedExecutor
         from rclpy.node import Node
         from sensor_msgs.msg import BatteryState
         from std_msgs.msg import String
@@ -40,16 +46,20 @@ def main(argv=None) -> int:
             self._battery = None
             self.robot.battery = lambda: self._battery
             self.robot.on_task(self._task)
+            # the task handler blocks until the robot's own nodes answer on paybox/task_result, so every callback
+            # must be able to run concurrently: reentrant group + multi-threaded executor, or the node deadlocks
+            self._cbg = ReentrantCallbackGroup()
             self.pub_task = self.create_publisher(String, "paybox/task", 10)
             self.pub_pay = self.create_publisher(String, "paybox/payment", 10)
             self.pub_say = self.create_publisher(String, "paybox/say", 10)
-            self.create_subscription(BatteryState, "battery_state", self._on_battery, 10)
-            self.create_subscription(String, "paybox/pay", self._on_pay, 10)
-            self.create_subscription(String, "paybox/task_result", self._on_task_result, 10)
+            self.create_subscription(BatteryState, "battery_state", self._on_battery, 10, callback_group=self._cbg)
+            self.create_subscription(String, "paybox/pay", self._on_pay, 10, callback_group=self._cbg)
+            self.create_subscription(String, "paybox/task_result", self._on_task_result, 10, callback_group=self._cbg)
             self._open = {}
             self._pending = {}
-            self.create_timer(float(self.get_parameter("heartbeat_s").value), self._beat)
-            self.create_timer(3.0, self._poll_payments)
+            self.create_timer(float(self.get_parameter("heartbeat_s").value), self._beat, callback_group=self._cbg)
+            self.create_timer(3.0, self._poll_payments, callback_group=self._cbg)
+            self._beating = threading.Lock()
             self.get_logger().info(f"{self.robot.name} online as {self.robot.hub.robot_id}")
 
         def _say(self, text: str):
@@ -60,10 +70,14 @@ def main(argv=None) -> int:
             self._battery = p * 100 if 0 <= p <= 1 else p
 
         def _beat(self):
+            if not self._beating.acquire(blocking=False):
+                return  # a task is still running under the previous beat
             try:
                 self.robot.step()
             except Exception as e:  # keep beating
                 self.get_logger().warning(f"hub: {e}")
+            finally:
+                self._beating.release()
 
         def _task(self, task):
             # hand the task to the robot's own nodes and return when they report; step() blocks the timer meanwhile
@@ -115,8 +129,10 @@ def main(argv=None) -> int:
 
     rclpy.init(args=argv)
     node = PayBoxRobotNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

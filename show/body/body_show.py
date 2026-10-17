@@ -23,6 +23,8 @@ from servo_controller_msgs.msg import ServoPosition, ServosPosition
 from ros_robot_controller_msgs.msg import BuzzerState, LedState
 
 PORT = 8800
+BIND = "127.0.0.1"  # the show script runs on the same machine; nothing on the network may drive the body
+ARM_IDS = {19, 20, 21, 22, 23, 24}  # the camera arm; leg servos are never addressed directly
 ARM_REST = {19: 500, 20: 720, 21: 130, 22: 150, 23: 500, 24: 500}
 LOOK = {"down": {19: 500, 20: 720, 21: 130, 22: 150}, "ahead": {19: 500, 20: 720, 21: 130, 22: 450}, "low": {19: 500, 20: 720, 21: 130, 22: 350}, "up": {19: 500, 20: 720, 21: 130, 22: 500}}
 MAX_X, MAX_YAW, MAX_RPY, MAX_XYZ = 0.10, 0.5, 0.2, 0.03
@@ -101,8 +103,10 @@ class Body(Node):
             preset = p.get("preset", ""); base = dict(LOOK.get(preset, {})) if preset else {}
             k = 1000.0 / 240.0; pan = clamp(float(p.get("pan_deg", 0)), -60, 60); tilt = clamp(float(p.get("tilt_deg", 0)), -40, 40)
             tilt_base = base.get(22, ARM_REST[22]); targets = {**base, 19: ARM_REST[19] + pan * k, 22: clamp(tilt_base + tilt * k, 50, 600)}
-            if p.get("servos"):  # raw {id: pulse} for tuning
+            if p.get("servos"):  # raw {id: pulse} for tuning the arm only
                 targets = {int(k): float(v) for k, v in dict(p["servos"]).items()}
+                if any(i not in ARM_IDS for i in targets):
+                    return {"looking": False, "reason": "only arm servos 19-24 may be set directly"}
             m = ServosPosition(); m.duration = clamp(float(p.get("duration_s", 0.8)), 0.2, 3); m.position_unit = "pulse"
             m.position = [ServoPosition(id=int(i), position=float(clamp(v, 0, 1000))) for i, v in targets.items()]
             self.pub_servo.publish(m); self.pub_servo2.publish(m); return {"looking": True, "pulses": {i: round(v) for i, v in targets.items()}}
@@ -132,7 +136,7 @@ def serve(node: Body):
             with node.lock:
                 self._send(200, node.act(str(req.get("action", "")), dict(req.get("params") or {})))
         def log_message(self, *a): pass
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    ThreadingHTTPServer((BIND, PORT), H).serve_forever()
 
 
 def main():
