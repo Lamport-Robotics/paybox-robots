@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paybox-robot"
+version = "0.1.0"
+description = "Give a robot a wallet it cannot spend alone: tasks, budgets and payment requests the owner approves in PayBox."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+pincer1 = ["websockets>=12"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+paybox-robot = "paybox_robot.cli:main"
+paybox-robot-ros2 = "paybox_robot.ros2_node:main"
+paybox-robot-pincer1 = "paybox_robot.pincer1:main"
+
+[tool.setuptools.packages.find]
+include = ["paybox_robot*"]
