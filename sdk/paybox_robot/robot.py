@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import threading
 import time
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .hub import DEFAULT_HUB, Hub, HubError
 
@@ -35,17 +36,32 @@ TERMINAL = ("success", "failed", "rejected", "dropped")
 DECIMALS = {"SOL": 9, "USDC": 6}
 
 
-def to_atomic(amount: float, asset: str) -> str:
-    """Exact base units as a decimal string: lamports for SOL, 6-decimal units for USDC."""
-    d = DECIMALS.get(asset.upper())
-    if d is None:
+def _decimal(amount) -> Decimal:
+    try:
+        d = Decimal(str(amount))
+    except InvalidOperation:
+        raise ValueError(f"not a number: {amount!r}") from None
+    if not d.is_finite() or d <= 0:
+        raise ValueError("amount must be a positive number")
+    return d
+
+
+def to_atomic(amount, asset: str) -> str:
+    """Exact base units as a decimal string: lamports for SOL, 6-decimal units for USDC. No floats."""
+    dec = DECIMALS.get(asset.upper())
+    if dec is None:
         raise ValueError(f"unsupported asset {asset}; use SOL or USDC")
-    return str(round(float(amount) * 10**d))
+    q = _decimal(amount).scaleb(dec)
+    if q != q.to_integral_value():
+        raise ValueError(f"{amount} {asset} has more precision than the asset supports")
+    return str(int(q))
 
 
-def to_cents(amount: float, asset: str) -> int | None:
-    """USD cents for the budget: exact for USDC and x402. SOL is priced by the hub, so None here."""
-    return None if asset.upper() == "SOL" else round(float(amount) * 100)
+def to_cents(amount, asset: str) -> int | None:
+    """USD cents for the local budget check: exact for USDC and x402. SOL is priced by the hub, so None here."""
+    if asset.upper() == "SOL":
+        return None
+    return int(_decimal(amount).scaleb(2).to_integral_value(rounding=ROUND_HALF_UP))
 
 
 @dataclass
@@ -70,7 +86,12 @@ class Payment:
 
     @property
     def allowed(self) -> bool:
-        return self.verdict != "deny"
+        """The hub said allow. A hold is not allowed; it is a request to look closer."""
+        return self.verdict == "allow"
+
+    @property
+    def denied(self) -> bool:
+        return self.verdict == "deny"
 
     @property
     def approved(self) -> bool:
@@ -101,6 +122,7 @@ class Robot:
         self._task_handler: Callable[[Task], Any] | None = None
         self._stop = threading.Event()
         self.current_task: Task | None = None
+        self.last_error: str | None = None
 
     # ---- setup / persistence -------------------------------------------------------------
     @classmethod
@@ -114,8 +136,11 @@ class Robot:
     def save(self, path: Path = CONFIG) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {"hub": self.hub.base, "robot_id": self.hub.robot_id, "robot_token": self.hub.token, "name": self.name, "owner_code": self.owner_code, "wallet": self.wallet, "budget_cents": self.budget_cents}
-        path.write_text(json.dumps(data, indent=2) + "\n")
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # the token is the robot's identity
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # the token is the robot's identity: never world-readable, not even briefly
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path: Path = CONFIG) -> "Robot":
@@ -136,7 +161,7 @@ class Robot:
                 pct = self.battery()
             except Exception:
                 pct = None
-        out = self.hub.heartbeat(battery_pct=pct, status=self.status, budget_cents=self.budget_cents, spent_cents=self.spent_cents, wallet=self.wallet)
+        out = self.hub.heartbeat(battery_pct=pct, status=self.status, budget_cents=self.budget_cents, wallet=self.wallet)  # spend is the hub's number, not ours
         t = out.get("task")
         return Task(t["id"], t["task"], t.get("max_spend_cents")) if t else None
 
@@ -149,22 +174,28 @@ class Robot:
         try:
             result = self._task_handler(task)
             self.hub.finish_task(task.id, result)
-        except Exception as e:  # the owner reads failures in PayBox
-            self.hub.finish_task(task.id, {"error": str(e)[:300]}, failed=True)
+        except Exception as e:  # the owner reads failures in PayBox; keep paths and internals in the local log
+            self.hub.finish_task(task.id, {"error": f"{type(e).__name__}: {str(e)[:120]}"}, failed=True)
         finally:
             self.current_task, self.status = None, "idle"
         return True
 
     def run(self) -> None:
+        backoff = self.heartbeat_s
         while not self._stop.is_set():
             try:
                 self.step()
+                self.last_error = None
+                backoff = self.heartbeat_s
             except HubError as e:
                 if e.status == 401:
-                    raise
-            except OSError:
-                pass  # offline; try again next beat
-            self._stop.wait(self.heartbeat_s)
+                    raise  # a bad token never fixes itself
+                self.last_error = str(e)
+                backoff = min(60.0, backoff * 2) if e.status in (429, 500, 502, 503, 504) else self.heartbeat_s
+            except (OSError, ValueError) as e:  # offline, captive portal, bad json: keep beating, slower
+                self.last_error = str(e)[:200]
+                backoff = min(60.0, backoff * 2)
+            self._stop.wait(backoff)
 
     def start(self) -> threading.Thread:
         th = threading.Thread(target=self.run, name="paybox-robot", daemon=True)
@@ -195,12 +226,18 @@ class Robot:
 
     def pay_x402(self, endpoint: str, max_usd: float, purpose: str = "", merchant: str | None = None) -> Payment:
         """Ask the owner to settle a paid HTTP request (x402) up to `max_usd`."""
-        out = self.hub.create_payment(kind="x402", endpoint=endpoint, url=endpoint, merchant=merchant or endpoint.split("/")[2], asset="USDC", amount_cents=to_cents(max_usd, "USDC"), amount_atomic=to_atomic(max_usd, "USDC"), purpose=purpose)
+        u = urlsplit(endpoint)
+        if u.scheme != "https" or not u.hostname:
+            raise ValueError("x402 endpoints must be https URLs")
+        out = self.hub.create_payment(kind="x402", endpoint=endpoint, url=endpoint, merchant=merchant or u.hostname, asset="USDC", amount_cents=to_cents(max_usd, "USDC"), amount_atomic=to_atomic(max_usd, "USDC"), purpose=purpose)
         return self._payment(out)
 
     def refresh(self, pay: Payment) -> Payment:
         p = self.hub.payment(pay.id)
+        was = pay.status
         pay.status, pay.raw = p.get("status", pay.status), p
+        if pay.status == "success" and was != "success":
+            self.spent_cents += int(p.get("amount_cents") or 0)  # observed settlement, hub's figure
         return pay
 
     def wait(self, pay: Payment, timeout: float = 600, every: float = 3.0, until: str = "done") -> Payment:

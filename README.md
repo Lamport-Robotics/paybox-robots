@@ -57,7 +57,19 @@ Enable the PayBox for Robots plugin, then talk to it:
 > what does pincer1 want to pay?
 > pay it
 
-The plugin reaches one host, `lamport.si`, and needs no credentials.
+The plugin reaches one host, `lamport.si`. Reads are scoped by the owner code; writes
+that change a payment's outcome carry a secret header PayBox adds for that host.
+
+## Trust model
+
+- The amount the owner sees and the amount in the transaction come from the same base
+  units. The hub derives the dollar figure from them and ignores any figure the robot
+  sends alongside; the plugin refuses to build a proposal if the two disagree.
+- Caps are enforced by the hub, not the robot: a request above the running task's cap or
+  the robot's budget is denied before anyone sees it.
+- Owner codes identify, they do not authenticate. They expose read access to a robot's
+  inventory and requests, so pick a long one; lookups are rate limited.
+- The robot's token lives in one file, mode 600, and only travels over https.
 
 ## Hub
 

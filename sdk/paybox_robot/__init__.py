@@ -5,4 +5,4 @@ from .hub import Hub, HubError
 from .robot import Payment, Robot, Task
 
 __all__ = ["Hub", "HubError", "Payment", "Robot", "Task"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"

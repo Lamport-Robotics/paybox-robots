@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
@@ -16,9 +17,21 @@ class HubError(RuntimeError):
         self.status = status
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # a bearer token never follows a redirect
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 class Hub:
     def __init__(self, base: str = DEFAULT_HUB, token: str | None = None, robot_id: str | None = None, timeout: float = 15.0):
-        self.base = base.rstrip("/")
+        base = base.rstrip("/")
+        local = base.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
+        if not base.startswith("https://") and not (local or os.environ.get("PAYBOX_ROBOT_INSECURE") == "1"):
+            raise ValueError("the hub must be an https URL (set PAYBOX_ROBOT_INSECURE=1 only for a local test hub)")
+        self.base = base
         self.token = token
         self.robot_id = robot_id
         self.timeout = timeout
@@ -32,7 +45,7 @@ class Hub:
             headers["authorization"] = f"Bearer {self.token}"
         req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as res:
+            with _opener.open(req, timeout=self.timeout) as res:
                 return json.loads(res.read() or b"null")
         except urllib.error.HTTPError as e:
             try:

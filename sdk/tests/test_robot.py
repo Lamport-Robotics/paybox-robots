@@ -1,4 +1,5 @@
-import json, threading, time
+import json, os, threading, time
+os.environ["PAYBOX_ROBOT_INSECURE"] = "1"  # the fake hub below is plain http on localhost
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 from paybox_robot import Hub, Robot
@@ -26,7 +27,8 @@ class FakeHub(BaseHTTPRequestHandler):
         if "/tasks/" in p and p.endswith("/result"):
             STATE["result"] = b; return self._json(200, {"ok": True})
         if p.endswith("/review"):
-            return self._json(200, {"verdict": "deny" if (b.get("amount_cents") or 0) > 100000 else "allow", "say": "fine", "reasons": ["known"]})
+            c = b.get("amount_cents") or 0
+            return self._json(200, {"verdict": "deny" if c > 100000 else "hold" if c > 50000 else "allow", "say": "fine", "reasons": ["known"]})
         if p.endswith("/payments"):
             pid = f"pay_{len(STATE['payments'])+1}"; STATE["payments"][pid] = {**b, "status": "requested"}
             return self._json(200, {"id": pid, "review": {"verdict": "allow", "say": "looks fine", "reasons": []}})
@@ -52,10 +54,23 @@ def robot(hub_url, tmp_path):
     return Robot.load(tmp_path / "robot.json")
 
 def test_amounts():
-    assert to_cents(2.5, "USDC") == 250 and to_cents(0.01, "SOL") is None
-    assert to_atomic(0.01, "SOL") == "10000000" and to_atomic(2.5, "usdc") == "2500000"
-    with pytest.raises(ValueError):
-        to_atomic(1, "DOGE")
+    assert to_cents(2.5, "USDC") == 250 and to_cents(0.01, "SOL") is None and to_cents("0.005", "USDC") == 1
+    assert to_atomic(0.01, "SOL") == "10000000" and to_atomic(2.5, "usdc") == "2500000" and to_atomic("0.1", "USDC") == "100000"
+    assert to_atomic(1.1, "SOL") == "1100000000"  # no float drift
+    for bad in (("1", "DOGE"), ("0.0000001", "USDC"), ("-1", "SOL"), ("0", "USDC"), ("nan", "SOL")):
+        with pytest.raises(ValueError):
+            to_atomic(*bad)
+
+
+def test_https_required(tmp_path):
+    from paybox_robot.hub import Hub
+    os.environ.pop("PAYBOX_ROBOT_INSECURE")
+    try:
+        with pytest.raises(ValueError):
+            Hub("http://evil.example/api")
+        Hub("http://127.0.0.1:9/api")  # local test hubs are fine
+    finally:
+        os.environ["PAYBOX_ROBOT_INSECURE"] = "1"
 
 def test_setup_and_heartbeat(robot):
     robot.battery = lambda: 87.26
@@ -107,6 +122,28 @@ def test_drop(robot):
 
 def test_review(robot):
     assert robot.review(to="0x" + "3" * 40, amount=5000, asset="USDC")["verdict"] == "deny"
+
+
+def test_hold_is_not_allowed():
+    from paybox_robot import Payment
+    assert not Payment("pay_x", "hold", "").allowed and not Payment("pay_x", "hold", "").denied
+    assert Payment("pay_x", "allow", "").allowed and Payment("pay_x", "deny", "").denied
+
+
+def test_spend_follows_settlement(robot):
+    robot.budget_cents = None
+    before = robot.spent_cents
+    pay = robot.pay("0x" + "5" * 40, 0.30, "USDC", "spend")
+    STATE["payments"][pay.id].update(status="success", amount_cents=30)
+    robot.refresh(pay); robot.refresh(pay)  # counted once
+    assert robot.spent_cents == before + 30
+
+
+def test_x402_needs_https(robot):
+    with pytest.raises(ValueError):
+        robot.pay_x402("http://api.example.com/x", 0.1)
+    with pytest.raises(ValueError):
+        robot.pay_x402("api.example.com/x", 0.1)
 
 def test_bad_token(hub_url):
     from paybox_robot.hub import HubError

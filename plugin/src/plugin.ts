@@ -17,6 +17,17 @@ function base58Decode(s: string): Uint8Array {
   for (const ch of s) { if (ch !== "1") break; bytes.push(0); }
   const out = Uint8Array.from(bytes.reverse()); if (out.length !== 32) throw new Error("a solana address is 32 bytes"); return out;
 }
+// what the owner is shown is derived from the base units the transaction will carry, never from a second field
+const USDC_DEC = 10n ** 6n, SOL_DEC = 10n ** 9n;
+const fmtUnits = (atomic: bigint, dec: bigint, places: number) => { const whole = atomic / dec, frac = (atomic % dec).toString().padStart(Number(dec.toString().length - 1), "0").slice(0, places); return `${whole}.${frac}`; };
+const shownAmount = (p: any): string => {
+  const a = p.amount_atomic && /^\d+$/.test(String(p.amount_atomic)) ? BigInt(p.amount_atomic) : null;
+  if (a !== null && p.asset === "USDC") return `$${fmtUnits(a, USDC_DEC, 2)} USDC`;
+  if (a !== null && p.asset === "SOL") return `${fmtUnits(a, SOL_DEC, 4)} SOL` + (p.amount_cents ? ` (about $${(p.amount_cents / 100).toFixed(2)})` : "");
+  return `$${((p.amount_cents ?? 0) / 100).toFixed(2)}`;
+};
+// the two representations must agree, or nothing gets built
+const amountsAgree = (p: any): boolean => { if (!p.amount_atomic || p.asset !== "USDC") return true; const cents = Number(BigInt(p.amount_atomic) / 10_000n); return Math.abs(cents - Number(p.amount_cents ?? 0)) <= 1; };
 // the robot's exact amount in base units when it sent one, else usd cents scaled (usdc has 6 decimals: 1 cent = 10_000 units)
 const atomicOf = (p: any, perCent: number): string => (p.amount_atomic && /^\d+$/.test(String(p.amount_atomic)) ? String(p.amount_atomic) : String(BigInt(Math.floor(Number(p.amount_cents ?? 0))) * BigInt(perCent)));
 function solTransferBase64(from: string, to: string, lamports: bigint): string {
@@ -60,7 +71,7 @@ const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: t
 const proposal = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 
 function createServer() {
-  const server = new McpServer({ name: "lamport-robots", title: "PayBox for Robots", version: "0.1.0" }, { supportedProtocolVersions: [PROTOCOL_VERSION] });
+  const server = new McpServer({ name: "lamport-robots", title: "PayBox for Robots", version: "0.2.0" }, { supportedProtocolVersions: [PROTOCOL_VERSION] });
 
   server.registerTool("list_robots", {
     title: "List the owner's robots",
@@ -126,7 +137,7 @@ function createServer() {
     try {
       const out = await hub("pending_payments", { owner_code });
       const ps: any[] = out.payments ?? [];
-      const lines = ps.map((p) => p.id + " · " + p.robot + ": " + p.kind + " " + (p.amount || "$" + ((p.amount_cents ?? 0) / 100).toFixed(2)) + " to " + (p.merchant || p.endpoint) + ' for "' + p.purpose + '" · review ' + (p.review?.verdict ?? "?"));
+      const lines = ps.map((p) => p.id + " · " + p.robot + ": " + p.kind + " " + shownAmount(p) + " to " + (p.merchant || p.endpoint) + ' for "' + p.purpose + '" · review ' + (p.review?.verdict ?? "?"));
       return { content: [text(lines.length ? lines.join("\n") : "Nothing pending.")], structuredContent: { payments: ps } };
     } catch (e) { return fail("The robot hub is unavailable: " + (e as Error).message); }
   });
@@ -173,21 +184,24 @@ function createServer() {
     if (["success", "failed", "rejected", "dropped"].includes(p.status)) return fail(`That payment is already ${p.status}; nothing to settle.`);
     // requested, proposed or pending_confirmation: a proposal may be rebuilt, e.g. after the previous one expired unapproved
     const cents = max_amount_cents ?? p.amount_cents ?? 0; if (cents <= 0) return fail("The request has no amount.");
-    const settle = async (kind: string) => { try { await fetch(`${HUB}/payments/${payment_id}/settle`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "proposed", kind }), signal: AbortSignal.timeout(4_000) }); } catch { /* the log is best effort */ } };
+    if (!amountsAgree(p)) return fail("The request's usd figure and its base units disagree; refusing to build a proposal. Ask the robot to raise it again.");
+    if (max_amount_cents && p.amount_atomic && (p.amount_cents == null || p.amount_cents <= 0)) return fail("Cannot apply max_amount_cents: the hub has no usd valuation for this request.");
+    const settle = async (kind: string) => { try { await fetch(`${HUB}/payments/${payment_id}/settle`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "proposed", kind }), signal: AbortSignal.timeout(4_000), redirect: "error" }); } catch { /* the log is best effort */ } };
     try {
       if (p.kind === "x402") {
         const chain = p.robot_chain === "solana:mainnet" || solanaAddress.safeParse(p.robot_wallet ?? "").success ? "solana:mainnet" : "eip155:8453";
-        const out = proposeX402({ chain, url: String(p.endpoint ?? p.url), maxAmount: String(max_amount_cents ? max_amount_cents * 10_000 : atomicOf(p, 10_000)), method: "GET" });
+        const out = proposeX402({ chain, url: String(p.endpoint ?? p.url), maxAmount: String(max_amount_cents ? Math.min(max_amount_cents * 10_000, Number(atomicOf(p, 10_000))) : atomicOf(p, 10_000)), method: "GET" });
         await settle("x402"); return out;
       }
       const to = String(p.merchant ?? "");
-      if (isAddress(to)) { const data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [to as `0x${string}`, BigInt(max_amount_cents ? max_amount_cents * 10_000 : atomicOf(p, 10_000))] }); const out = proposeEvm({ chain: "eip155:8453", to: USDC_BASE, value: "0", data }); await settle("transfer"); return out; }
+      if (isAddress(to)) { const data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [to as `0x${string}`, BigInt(atomicOf(p, 10_000))] });
+        if (max_amount_cents && BigInt(atomicOf(p, 10_000)) > BigInt(max_amount_cents) * 10_000n) return fail("The request (" + shownAmount(p) + ") is above your max_amount_cents."); const out = proposeEvm({ chain: "eip155:8453", to: USDC_BASE, value: "0", data }); await settle("transfer"); return out; }
       if (solanaAddress.safeParse(to).success) {
         if (!sender) return fail("Pass the owner's Solana wallet address as `sender`.");
         // the robot quotes solana merchants in lamports (asset SOL, amount_atomic); the hub prices it in usd for the budget
         if (p.asset !== "SOL" || !p.amount_atomic) return fail("Only SOL transfers are supported for Solana merchants in this version; the robot must quote asset SOL with the amount in lamports.");
-        if (max_amount_cents && (p.amount_cents ?? 0) > max_amount_cents) return fail("The request (" + p.amount + ") is above your max_amount_cents.");
         const lamports = BigInt(p.amount_atomic);
+        if (max_amount_cents) { const maxLamports = (BigInt(max_amount_cents) * lamports) / BigInt(Math.max(1, Number(p.amount_cents ?? 0))); if (lamports > maxLamports) return fail("The request (" + shownAmount(p) + ") is above your max_amount_cents."); }
         const out = proposeSolana({ transactionBase64: solTransferBase64(sender, to, lamports) }); await settle("transfer"); return out;
       }
       return fail("The merchant is not an address and the request is not x402; nothing to propose.");
@@ -201,7 +215,7 @@ function createServer() {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ payment_id, status, request_id, tx_hash, note }) => {
     try {
-      const r = await fetch(`${HUB}/payments/${payment_id}/settle`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status, request_id, tx_hash, note }), signal: AbortSignal.timeout(8_000) });
+      const r = await fetch(`${HUB}/payments/${payment_id}/settle`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status, request_id, tx_hash, note }), signal: AbortSignal.timeout(8_000), redirect: "error" });
       if (!r.ok) return fail("The hub did not accept the confirmation (" + r.status + ").");
       const j = (await r.json()) as any;
       return { content: [text(status === "success" ? "Recorded: " + (j.amount ?? "the payment") + " paid" + (tx_hash ? " (" + tx_hash.slice(0, 10) + "…)" : "") + ". The robot has been told." : "Recorded as " + status + ". The robot will stop waiting.")] };
