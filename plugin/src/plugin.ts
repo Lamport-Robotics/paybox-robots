@@ -50,6 +50,10 @@ async function hubGet(path: string): Promise<any> {
 }
 const fail = (msg: string) => ({ isError: true as const, content: [text(msg)] });
 const robotSchema = z.object({ id: z.string(), name: z.string(), kind: z.string(), status: z.string().nullable(), battery_pct: z.number().nullable(), budget_cents: z.number().nullable(), spent_cents: z.number().nullable(), wallet: z.string().nullable(), chain: z.string().nullable(), last_seen: z.string().nullable(), online: z.boolean(), meta: z.record(z.string(), z.unknown()) });
+// paybox wants `io.paybox/transactionProposal` declared directly in the tool's output schema; the kind varies per payment, so the union sits inside the property
+const PROPOSAL_KEY = "io.paybox/transactionProposal" as const;
+const transferProposalSchema = z.object({ [PROPOSAL_KEY]: z.union([evmOutputSchema.shape[PROPOSAL_KEY], solanaOutputSchema.shape[PROPOSAL_KEY]]) }).strict();
+const anyProposalSchema = z.object({ [PROPOSAL_KEY]: z.union([x402OutputSchema.shape[PROPOSAL_KEY], evmOutputSchema.shape[PROPOSAL_KEY], solanaOutputSchema.shape[PROPOSAL_KEY]]) }).strict();
 const paymentSchema = z.object({ id: z.string(), robot_id: z.string(), robot: z.string().optional(), kind: z.string(), merchant: z.string().nullable(), url: z.string().nullable(), endpoint: z.string().nullable(), asset: z.string().nullable(), amount_cents: z.number().nullable(), purpose: z.string().nullable(), status: z.string(), request_id: z.string().nullable(), review: z.unknown().nullable(), at: z.string(), amount_atomic: z.string().nullable().optional(), amount: z.string().optional(), tx_hash: z.string().nullable().optional() });
 const reviewSchema = z.object({ verdict: z.enum(["allow", "hold", "deny"]), risk: z.number(), reasons: z.array(z.string()), facts: z.record(z.string(), z.unknown()), say: z.string() });
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
@@ -143,7 +147,7 @@ function createServer() {
     title: "Top up a robot's wallet",
     description: "Propose a transfer from the owner's PayBox wallet to the robot's own wallet: USDC on Base for an EVM robot, SOL on Solana for a Solana robot (pass the owner's Solana address as sender). Returns an unsigned proposal; PayBox approves and signs it. Review first.",
     inputSchema: z.object({ robot_id: robotId, amount: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,9})?$/, "a decimal amount such as 2.50"), sender: solanaAddress.optional() }).strict(),
-    outputSchema: z.union([evmOutputSchema, solanaOutputSchema]),
+    outputSchema: transferProposalSchema,
     annotations: proposal,
   }, async ({ robot_id, amount, sender }) => {
     let r: any; try { r = (await hub("robot_status", { robot_id })).robot; } catch (e) { return fail(`The robot hub is unavailable: ${(e as Error).message}`); }
@@ -162,11 +166,12 @@ function createServer() {
     title: "Settle a robot's payment request",
     description: "Turn a pending robot payment into a PayBox proposal: an x402 paid request (USDC on Base or Solana) or a transfer to the merchant address (USDC on Base, SOL on Solana with the owner's address as sender). Run review_payment first and read its line to the owner; do not settle a request Lamport marked deny unless the owner insists. After the owner approves, follow the returned request ID to a terminal status and call confirm_robot_payment with it, so the robot learns whether the money actually moved.",
     inputSchema: z.object({ payment_id: paymentId, sender: solanaAddress.optional(), max_amount_cents: z.number().int().min(1).optional() }).strict(),
-    outputSchema: z.union([x402OutputSchema, evmOutputSchema, solanaOutputSchema]),
+    outputSchema: anyProposalSchema,
     annotations: proposal,
   }, async ({ payment_id, sender, max_amount_cents }) => {
     let p: any; try { p = await hubGet(`/payments/${payment_id}`); } catch (e) { return fail(`The robot hub is unavailable: ${(e as Error).message}`); }
-    if (p.status !== "requested") return fail(`That payment is ${p.status}, not pending.`);
+    if (["success", "failed", "rejected", "dropped"].includes(p.status)) return fail(`That payment is already ${p.status}; nothing to settle.`);
+    // requested, proposed or pending_confirmation: a proposal may be rebuilt, e.g. after the previous one expired unapproved
     const cents = max_amount_cents ?? p.amount_cents ?? 0; if (cents <= 0) return fail("The request has no amount.");
     const settle = async (kind: string) => { try { await fetch(`${HUB}/payments/${payment_id}/settle`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "proposed", kind }), signal: AbortSignal.timeout(4_000) }); } catch { /* the log is best effort */ } };
     try {
