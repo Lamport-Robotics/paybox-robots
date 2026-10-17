@@ -13,7 +13,7 @@ HTTP wrapper around the stock stack) and talks to the PayBox hub with paybox-rob
 Scene (about 80 s):
   1. wakes: stands, looks at the camera, beeps, greets
   2. walks a few steps, stops, turns to the owner
-  3. asks for the route fee: 0.01 SOL to Jupiter. The hub reviews the address; the robot reads
+  3. asks for the route fee: 1.50 USDC on Base to the owner's wallet. The hub reviews the address; the robot reads
      the verdict, raises the request, and waits for the owner to approve it in PayBox
   4. "Paid, thank you" once PayBox confirms (or says what happened)
   5. a drainer link comes in: the robot refuses out loud and shakes its head (body roll)
@@ -45,7 +45,8 @@ if _env.exists():
 BODY = os.environ.get("BODY_API", "http://127.0.0.1:8800")
 VOICE_DIR = Path(__file__).resolve().parent / "voice"
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # George
-JUP = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+MERCHANT = os.environ.get("SHOW_MERCHANT", "0x5Fe289A3B3f03367eC70f15F6067ceBDd65aBb57")  # the owner's own wallet in the demo
+AMOUNT, ASSET = float(os.environ.get("SHOW_AMOUNT", "1.50")), os.environ.get("SHOW_ASSET", "USDC")
 DRAINER = "https://totally-not-a-drainer.xyz/claim"
 
 LINES = {
@@ -191,12 +192,12 @@ def show(dry: bool, skip_wait: bool) -> None:
 
     # 3. the route fee
     voice.say(LINES["need"])
-    rv = robot.review(to=JUP, amount=0.01, asset="SOL")
+    rv = robot.review(to=MERCHANT, amount=AMOUNT, asset=ASSET)
     voice.say(rv.get("say", "I could not reach the reviewer."))
     if rv.get("verdict") == "deny":
         voice.say("So I will not ask for this one.")
     else:
-        pay = robot.pay(JUP, 0.01, "SOL", purpose="route fee for the morning swap")
+        pay = robot.pay(MERCHANT, AMOUNT, ASSET, purpose="route fee for the morning swap")
         voice.say(LINES["asking"])
         body.act("pose", pitch=-0.08, duration_s=1.0)  # a small nod towards the owner
         time.sleep(1.2)
