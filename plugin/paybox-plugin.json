@@ -1,0 +1,8 @@
+{
+  "tool": "review_payment",
+  "arguments": {
+    "address": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+    "amount_cents": 500,
+    "merchant": "jupiter"
+  }
+}
