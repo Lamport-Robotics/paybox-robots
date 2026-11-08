@@ -172,10 +172,12 @@ class Robot:
             return False
         self.current_task, self.status = task, "working"
         try:
-            result = self._task_handler(task)
-            self.hub.finish_task(task.id, result)
-        except Exception as e:  # the owner reads failures in PayBox; keep paths and internals in the local log
-            self.hub.finish_task(task.id, {"error": f"{type(e).__name__}: {str(e)[:120]}"}, failed=True)
+            try:
+                result = self._task_handler(task)
+            except Exception as e:  # the owner reads failures in PayBox; keep paths and internals in the local log
+                self.hub.finish_task(task.id, {"error": f"{type(e).__name__}: {str(e)[:120]}"}, failed=True)
+            else:  # a hub error while reporting is not the task failing: it goes to run(), which backs off
+                self.hub.finish_task(task.id, result)
         finally:
             self.current_task, self.status = None, "idle"
         return True
@@ -210,8 +212,12 @@ class Robot:
         rv = out.get("review") or {}
         return Payment(out["id"], rv.get("verdict", "hold"), rv.get("say", ""), list(rv.get("reasons", [])), raw=out)
 
-    def review(self, to: str | None = None, url: str | None = None, amount: float = 0, asset: str = "USDC", merchant: str | None = None) -> dict:
-        return self.hub.review(address=to, url=url, merchant=merchant or to, amount_cents=to_cents(amount, asset), asset=asset.upper(), amount_atomic=to_atomic(amount, asset))
+    def review(self, to: str | None = None, url: str | None = None, amount: float | None = None, asset: str = "USDC", merchant: str | None = None) -> dict:
+        """What the hub thinks of a recipient. Without an amount (or with 0) only the recipient is reviewed."""
+        priced = amount is not None and amount != 0
+        return self.hub.review(address=to, url=url, merchant=merchant or to, asset=asset.upper(),
+                               amount_cents=to_cents(amount, asset) if priced else None,
+                               amount_atomic=to_atomic(amount, asset) if priced else None)
 
     def pay(self, to: str, amount: float, asset: str = "USDC", purpose: str = "", url: str | None = None) -> Payment:
         """Ask the owner to pay `amount` of `asset` to the address `to`. USDC on Base or SOL on Solana."""

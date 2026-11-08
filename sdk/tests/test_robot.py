@@ -150,3 +150,76 @@ def test_bad_token(hub_url):
     with pytest.raises(HubError) as e:
         Hub(hub_url, "rbt_wrong", "rb_1").heartbeat()
     assert e.value.status == 401
+
+
+def test_review_without_an_amount(robot):
+    # `paybox-robot review <address>` passes --amount's default of 0: review the recipient, price nothing
+    assert robot.review(to="0x" + "3" * 40)["verdict"] == "allow"
+    assert robot.review(url="https://api.example.com/forecast", amount=0)["verdict"] == "allow"
+
+
+def test_hub_error_reporting_a_result_is_not_a_failed_task(tmp_path):
+    from paybox_robot import HubError
+    class Flaky(FakeHub):
+        def do_POST(self):
+            if self.path.endswith("/result") and not seen:
+                seen.append(self.path); self._body(); return self._json(502, {"error": "bad gateway"})
+            return super().do_POST()
+    seen = []
+    srv = HTTPServer(("127.0.0.1", 0), Flaky); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        r = Robot.setup("t", "owner-1", hub_url=f"http://127.0.0.1:{srv.server_port}", path=tmp_path / "robot.json")
+        STATE.pop("result", None)
+        STATE["tasks"].append({"id": "task_3", "task": "fetch", "max_spend_cents": 50})
+        r.on_task(lambda t: {"fetched": True})
+        with pytest.raises(HubError):  # run() backs off on it
+            r.step()
+        assert "result" not in STATE and r.current_task is None and r.status == "idle"  # not reported as failed
+    finally:
+        srv.shutdown()
+
+
+def test_pincer1_bridge_keeps_hub_calls_off_the_loop(tmp_path):
+    import asyncio
+    from paybox_robot.pincer1 import Pincer1Bridge
+    class Slow(FakeHub):
+        def do_POST(self):
+            if self.path.endswith("/take"):
+                time.sleep(0.8)  # a slow hub
+            if self.path.endswith("/result") and not seen:
+                seen.append(self.path); self._body(); return self._json(502, {"error": "bad gateway"})
+            return super().do_POST()
+    seen = []
+    srv = HTTPServer(("127.0.0.1", 0), Slow); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        r = Robot.setup("t", "owner-1", hub_url=f"http://127.0.0.1:{srv.server_port}", path=tmp_path / "robot.json")
+        r.heartbeat_s = 0.05
+        STATE.pop("result", None)
+        STATE["tasks"].append({"id": "task_4", "task": "look outside", "max_spend_cents": 0})
+        bridge = Pincer1Bridge(r)  # no robot attached: say() prints
+        bridge.on_task(lambda t: {"looked": True})
+
+        async def go():
+            beats, ticks = asyncio.create_task(bridge._heartbeat()), []
+            end = time.monotonic() + 2.0
+            while time.monotonic() < end:
+                ticks.append(time.monotonic()); await asyncio.sleep(0.02)
+            beats.cancel()
+            return max(b - a for a, b in zip(ticks, ticks[1:]))
+        assert asyncio.run(go()) < 0.4  # the websocket reader would have kept running
+        assert seen and "result" not in STATE  # the 502 on the result was not turned into a failed task
+    finally:
+        srv.shutdown()
+
+
+def test_https_required_compares_the_host():
+    from paybox_robot.hub import Hub
+    os.environ.pop("PAYBOX_ROBOT_INSECURE")
+    try:
+        for not_local in ("http://localhost.evil.example/api", "http://localhost@evil.example/api", "http://127.0.0.1.nip.io/api", "http://127.0.0.1:9@evil.example/api"):
+            with pytest.raises(ValueError):
+                Hub(not_local)
+        for local in ("http://localhost:8787/api", "http://LOCALHOST/api", "http://[::1]:8787/api"):
+            Hub(local)
+    finally:
+        os.environ["PAYBOX_ROBOT_INSECURE"] = "1"

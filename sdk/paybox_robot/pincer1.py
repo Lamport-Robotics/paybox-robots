@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import uuid
+from functools import partial
 from typing import Any, Callable
 
 from .robot import Payment, Robot, Task
@@ -64,7 +65,11 @@ class Pincer1Bridge:
         return bool(r and r.get("ok"))
 
     async def request_payment(self, to: str | None = None, amount: float = 0, asset: str = "USDC", purpose: str = "", x402: str | None = None, max_usd: float = 0) -> Payment | None:
-        rv = self.robot.review(url=x402, amount=max_usd) if x402 else self.robot.review(to=to, amount=amount, asset=asset)
+        loop = asyncio.get_running_loop()
+        if x402:
+            rv = await loop.run_in_executor(None, partial(self.robot.review, url=x402, amount=max_usd))
+        else:
+            rv = await loop.run_in_executor(None, partial(self.robot.review, to=to, amount=amount, asset=asset))
         verdict, line = rv.get("verdict", "hold"), rv.get("say", "")
         if verdict == "deny":
             await self.say(f"I will not pay this. {line}")
@@ -73,9 +78,12 @@ class Pincer1Bridge:
         if not await self.ask_passphrase():
             await self.say("No passphrase. I dropped the request.")
             return None
-        pay = self.robot.pay_x402(x402, max_usd, purpose) if x402 else self.robot.pay(to, amount, asset, purpose)
+        if x402:
+            pay = await loop.run_in_executor(None, self.robot.pay_x402, x402, max_usd, purpose)
+        else:
+            pay = await loop.run_in_executor(None, self.robot.pay, to, amount, asset, purpose)
         await self.say("Sent to your PayBox. Approve it there and I will carry on.")
-        asyncio.get_running_loop().create_task(self._follow(pay))
+        loop.create_task(self._follow(pay))
         return pay
 
     async def _follow(self, pay: Payment, timeout: float = 900, every: float = 3.0) -> None:
@@ -128,16 +136,19 @@ class Pincer1Bridge:
 
     async def _heartbeat(self) -> None:
         loop = asyncio.get_running_loop()
+        hub = self.robot.hub
         while True:
             try:
                 task = await loop.run_in_executor(None, self.robot.beat)
-                if task and self.robot.hub.take_task(task.id):
+                # every hub call runs off the loop: a slow hub must not stall the websocket reader
+                if task and await loop.run_in_executor(None, hub.take_task, task.id):
                     await self.say(f"New task from my owner: {task.text}")
                     try:
                         result = (await loop.run_in_executor(None, self._task_handler, task)) if self._task_handler else {"spoken": True}
-                        self.robot.hub.finish_task(task.id, result)
                     except Exception as e:
-                        self.robot.hub.finish_task(task.id, {"error": str(e)[:300]}, failed=True)
+                        await loop.run_in_executor(None, partial(hub.finish_task, task.id, {"error": str(e)[:300]}, failed=True))
+                    else:  # a hub error while reporting the result is not the task failing
+                        await loop.run_in_executor(None, hub.finish_task, task.id, result)
             except Exception:
                 pass
             await asyncio.sleep(self.robot.heartbeat_s)
