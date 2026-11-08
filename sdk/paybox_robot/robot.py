@@ -210,8 +210,12 @@ class Robot:
         rv = out.get("review") or {}
         return Payment(out["id"], rv.get("verdict", "hold"), rv.get("say", ""), list(rv.get("reasons", [])), raw=out)
 
-    def review(self, to: str | None = None, url: str | None = None, amount: float = 0, asset: str = "USDC", merchant: str | None = None) -> dict:
-        return self.hub.review(address=to, url=url, merchant=merchant or to, amount_cents=to_cents(amount, asset), asset=asset.upper(), amount_atomic=to_atomic(amount, asset))
+    def review(self, to: str | None = None, url: str | None = None, amount: float | None = None, asset: str = "USDC", merchant: str | None = None) -> dict:
+        """What the hub thinks of a recipient. Without an amount (or with 0) only the recipient is reviewed."""
+        priced = amount is not None and amount != 0
+        return self.hub.review(address=to, url=url, merchant=merchant or to, asset=asset.upper(),
+                               amount_cents=to_cents(amount, asset) if priced else None,
+                               amount_atomic=to_atomic(amount, asset) if priced else None)
 
     def pay(self, to: str, amount: float, asset: str = "USDC", purpose: str = "", url: str | None = None) -> Payment:
         """Ask the owner to pay `amount` of `asset` to the address `to`. USDC on Base or SOL on Solana."""

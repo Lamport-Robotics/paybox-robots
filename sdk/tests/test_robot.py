@@ -150,3 +150,9 @@ def test_bad_token(hub_url):
     with pytest.raises(HubError) as e:
         Hub(hub_url, "rbt_wrong", "rb_1").heartbeat()
     assert e.value.status == 401
+
+
+def test_review_without_an_amount(robot):
+    # `paybox-robot review <address>` passes --amount's default of 0: review the recipient, price nothing
+    assert robot.review(to="0x" + "3" * 40)["verdict"] == "allow"
+    assert robot.review(url="https://api.example.com/forecast", amount=0)["verdict"] == "allow"
