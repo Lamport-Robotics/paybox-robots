@@ -7,8 +7,10 @@ import os
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlsplit
 
 DEFAULT_HUB = "https://lamport.si/api/robots"
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
 class HubError(RuntimeError):
@@ -28,7 +30,9 @@ _opener = urllib.request.build_opener(_NoRedirect)
 class Hub:
     def __init__(self, base: str = DEFAULT_HUB, token: str | None = None, robot_id: str | None = None, timeout: float = 15.0):
         base = base.rstrip("/")
-        local = base.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
+        u = urlsplit(base)
+        # compare the parsed host, not a prefix: http://localhost.example and http://localhost@example are not local
+        local = u.scheme == "http" and u.hostname in LOOPBACK and u.username is None and u.password is None
         if not base.startswith("https://") and not (local or os.environ.get("PAYBOX_ROBOT_INSECURE") == "1"):
             raise ValueError("the hub must be an https URL (set PAYBOX_ROBOT_INSECURE=1 only for a local test hub)")
         self.base = base

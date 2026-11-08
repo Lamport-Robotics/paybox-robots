@@ -210,3 +210,16 @@ def test_pincer1_bridge_keeps_hub_calls_off_the_loop(tmp_path):
         assert seen and "result" not in STATE  # the 502 on the result was not turned into a failed task
     finally:
         srv.shutdown()
+
+
+def test_https_required_compares_the_host():
+    from paybox_robot.hub import Hub
+    os.environ.pop("PAYBOX_ROBOT_INSECURE")
+    try:
+        for not_local in ("http://localhost.evil.example/api", "http://localhost@evil.example/api", "http://127.0.0.1.nip.io/api", "http://127.0.0.1:9@evil.example/api"):
+            with pytest.raises(ValueError):
+                Hub(not_local)
+        for local in ("http://localhost:8787/api", "http://LOCALHOST/api", "http://[::1]:8787/api"):
+            Hub(local)
+    finally:
+        os.environ["PAYBOX_ROBOT_INSECURE"] = "1"
