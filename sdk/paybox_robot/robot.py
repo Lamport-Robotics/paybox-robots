@@ -172,10 +172,12 @@ class Robot:
             return False
         self.current_task, self.status = task, "working"
         try:
-            result = self._task_handler(task)
-            self.hub.finish_task(task.id, result)
-        except Exception as e:  # the owner reads failures in PayBox; keep paths and internals in the local log
-            self.hub.finish_task(task.id, {"error": f"{type(e).__name__}: {str(e)[:120]}"}, failed=True)
+            try:
+                result = self._task_handler(task)
+            except Exception as e:  # the owner reads failures in PayBox; keep paths and internals in the local log
+                self.hub.finish_task(task.id, {"error": f"{type(e).__name__}: {str(e)[:120]}"}, failed=True)
+            else:  # a hub error while reporting is not the task failing: it goes to run(), which backs off
+                self.hub.finish_task(task.id, result)
         finally:
             self.current_task, self.status = None, "idle"
         return True
